@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Gerador de Histórias — WebLLM Local (Qwen 2 · Modo 3)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { scrollbar-width: thin; scrollbar-color: #475569 #1e293b; }
+        *::-webkit-scrollbar { width: 8px; }
+        *::-webkit-scrollbar-track { background: #1e293b; }
+        *::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        pre { white-space: pre-wrap; word-break: break-word; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-200">
+<div id="app" class="min-h-screen p-6"></div>
+
+<script>
+/*
+  Versão "Arquivo Único" que permite carregar o runtime WebLLM localmente
+  sem depender de CDN: o usuário fornece o arquivo runtime (webllm.min.js)
+  via um campo de upload — o script então injeta e avalia o runtime em tempo de execução.
+  Isso preserva o objetivo "um único arquivo .html" e evita bloqueios de rede.
+*/
+
+/* -------------------------
+   UTIL HELPERS
+   ------------------------- */
+function el(html) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html.trim();
+    return tmp.firstChild;
+}
+function downloadText(filename, text) {
+    const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+}
+
+/* -------------------------
+   APP STATE
+   ------------------------- */
+const state = {
+    modelLoaded: false,
+    llm: null,
+    loadingModel: false,
+    generating: false,
+    runtimeInjected: false,
+    runtimeSourceName: '',
+    modelConfig: {
+        // model name for display only
+        modelName: "Qwen 2 Instruct (7B)",
+    },
+    form: {
+        country: "",
+        title: "",
+        synopsis: "",
+        outputLanguage: "Portuguese",
+        tone: "emotional",
+        targetAudience: "general",
+        duration: "long"
+    },
+    story: null,
+    prompts: null,
+    promptMode: 3
+};
+
+/* -------------------------
+   RENDER UI
+   ------------------------- */
+function render() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="text-center mb-6">
+        <h1 class="text-4xl font-bold text-white mb-1">📖 Gerador de Histórias (WebLLM — Local)</h1>
+        <p class="text-slate-400">Modelo alvo: <strong>${state.modelConfig.modelName}</strong> • Modo 3: Cinematográfico + Thumbnail</p>
+      </div>
+
+      <div class="bg-slate-800 rounded-xl shadow p-6">
+        <div class="grid md:grid-cols-2 gap-6">
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">🌍 País</label>
+            <input id="country" class="w-full p-3 bg-slate-700 rounded border border-slate-600" value="${escapeHtml(state.form.country)}" placeholder="Ex: Brasil" oninput="onFieldChange(event,'country')">
+          </div>
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">📝 Título</label>
+            <input id="title" class="w-full p-3 bg-slate-700 rounded border border-slate-600" value="${escapeHtml(state.form.title)}" placeholder="Ex: A Última Carta" oninput="onFieldChange(event,'title')">
+          </div>
+          <div class="md:col-span-2">
+            <label class="block text-sm text-slate-300 mb-2">✍️ Sinopse</label>
+            <textarea id="synopsis" rows="4" class="w-full p-3 bg-slate-700 rounded border border-slate-600" placeholder="Escreva uma sinopse..." oninput="onFieldChange(event,'synopsis')">${escapeHtml(state.form.synopsis)}</textarea>
+          </div>
+
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">🌐 Idioma de saída</label>
+            <select id="outputLanguage" class="w-full p-3 bg-slate-700 rounded border border-slate-600" onchange="onFieldChange(event,'outputLanguage')">
+              ${["Portuguese","English","Spanish","French","Italian","German","Dutch"].map(l=>`<option ${state.form.outputLanguage===l?'selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">⏱️ Duração</label>
+            <select id="duration" class="w-full p-3 bg-slate-700 rounded border border-slate-600" onchange="onFieldChange(event,'duration')">
+              <option value="short" ${state.form.duration==='short'?'selected':''}>Curto (600-800 palavras)</option>
+              <option value="long" ${state.form.duration==='long'?'selected':''}>Longo (900-1200 palavras)</option>
+              <option value="epic" ${state.form.duration==='epic'?'selected':''}>Épico (1200-1500 palavras)</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">🎭 Tom</label>
+            <select id="tone" class="w-full p-3 bg-slate-700 rounded border border-slate-600" onchange="onFieldChange(event,'tone')">
+              <option value="emotional" ${state.form.tone==='emotional'?'selected':''}>Emocional e Tocante</option>
+              <option value="dramatic" ${state.form.tone==='dramatic'?'selected':''}>Dramático e Intenso</option>
+              <option value="inspiring" ${state.form.tone==='inspiring'?'selected':''}>Inspirador e Esperançoso</option>
+              <option value="mysterious" ${state.form.tone==='mysterious'?'selected':''}>Misterioso e Intrigante</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm text-slate-300 mb-2">👥 Público</label>
+            <select id="targetAudience" class="w-full p-3 bg-slate-700 rounded border border-slate-600" onchange="onFieldChange(event,'targetAudience')">
+              <option value="general" ${state.form.targetAudience==='general'?'selected':''}>Público Geral</option>
+              <option value="young" ${state.form.targetAudience==='young'?'selected':''}>Jovens (15-25)</option>
+              <option value="mature" ${state.form.targetAudience==='mature'?'selected':''}>Adultos (+30)</option>
+              <option value="family" ${state.form.targetAudience==='family'?'selected':''}>Familiar</option>
+            </select>
+          </div>
+
+        </div>
+
+        <div class="mt-6 flex gap-3">
+          <button id="generateBtn" class="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 py-3 rounded text-white font-bold" onclick="onGenerate()" ${state.generating ? 'disabled' : ''}>
+            ${state.generating ? '⏳ Gerando...' : '▶️ Gerar História & Prompts (Carrega runtime via upload)'}
+          </button>
+          <button id="helpBtn" class="px-4 py-3 bg-slate-700 rounded border border-slate-600 text-sm" onclick="toggleHelp()">❓ Ajuda</button>
+        </div>
+
+        <div id="runtimeArea" class="mt-4 p-4 bg-slate-700/20 rounded">
+          <h3 class="text-sm font-semibold text-white mb-2">⚠️ Runtime WebLLM (Local)</h3>
+          <p class="text-xs text-slate-400 mb-2">Para usar o modelo Qwen 2 (7B) no seu navegador você precisa do runtime WebLLM (webllm.min.js). Faça o download do arquivo (link dentro da ajuda) e depois faça upload aqui:</p>
+          <div class="flex gap-2 items-center">
+            <input id="runtimeFile" type="file" accept=".js,.mjs,.txt" class="p-1" onchange="onRuntimeFile(event)">
+            <button class="px-3 py-2 bg-emerald-600 rounded text-sm" onclick="injectRuntimeFromExample()">Ou usar runtime de exemplo (pequeno stub)</button>
+          </div>
+          <div id="runtimeStatus" class="mt-2 text-xs text-slate-300">${state.runtimeInjected ? 'Runtime carregado localmente: ' + escapeHtml(state.runtimeSourceName) : 'Runtime não carregado'}</div>
+        </div>
+
+        <div id="statusArea" class="mt-4 text-sm text-slate-400"></div>
+
+      </div>
+
+      <div id="resultArea" class="mt-6"></div>
+
+      <div class="mt-8 text-xs text-slate-500">
+        <p>Observação: Baixe o runtime oficial em: <span class="underline">https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.0.35/dist/webllm.min.js</span> (salve como webllm.min.js e faça upload aqui). Se preferir, clique em "usar runtime de exemplo" para testar a interface (o stub NÃO contém o modelo real — só permite testar a UI).</p>
+      </div>
+    </div>
+    `;
+}
+
+/* -------------------------
+   FIELD HANDLERS
+   ------------------------- */
+function onFieldChange(e, field) {
+    state.form[field] = e.target.value;
+}
+
+/* -------------------------
+   RUNTIME INJECTION
+   ------------------------- */
+function onRuntimeFile(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+        const code = ev.target.result;
+        injectRuntimeCode(code, f.name);
+    };
+    reader.readAsText(f);
+}
+function injectRuntimeCode(code, name) {
+    try {
+        // create a script element and inject the runtime code
+        const s = document.createElement('script');
+        s.type = 'text/javascript';
+        s.text = code;
+        document.head.appendChild(s);
+        state.runtimeInjected = true;
+        state.runtimeSourceName = name || 'local-runtime.js';
+        document.getElementById('runtimeStatus').innerText = 'Runtime carregado localmente: ' + state.runtimeSourceName;
+        setStatus('Runtime injetado. Você pode agora clicar em Gerar.');
+        console.log('Runtime injected from', name);
+    } catch (err) {
+        console.error('Erro ao injetar runtime', err);
+        alert('Erro ao injetar runtime: ' + err.message);
+    }
+}
+// small helper to inject a nonfunctional stub runtime so user can test UI without model
+function injectRuntimeFromExample() {
+    const stub = `// WEBLLM STUB: não é o runtime real. Fornece uma interface mínima para testes de UI.
+window.WebLLM = {
+  create: async function(cfg) {
+    // returns a fake llm with simple predict/generate that echoes prompts
+    return {
+      generate: async function(prompt, opts) {
+        // fake response
+        const text = "===CAPÍTULO 1===\\nTÍTULO: Exemplo\\nRESUMO: Resumo exemplo...\\nCORPO: (this is a short example response generated by the local stub)\\n===CAPÍTULO 2===\\n...\\n\\n";
+        return { text: text };
+      },
+      predict: async function(prompt) {
+        return { text: "FAKE RESPONSE: " + prompt.slice(0,500) };
+      }
+    };
+  }
+};`;
+    injectRuntimeCode(stub, 'webllm-stub.js');
+}
+
+/* -------------------------
+   MODEL LOADING
+   ------------------------- */
+async function loadModel() {
+    if (state.modelLoaded) return true;
+    setStatus('Inicializando runtime/modelo (local)...');
+    state.loadingModel = true;
+    try {
+        if (!window.WebLLM) {
+            setStatus('Runtime WebLLM não encontrado. Faça upload do webllm.min.js ou use o stub.');
+            state.loadingModel = false;
+            return false;
+        }
+        // try to create the model
+        try {
+            state.llm = await window.WebLLM.create({model: "qwen-2-7b"});
+            state.modelLoaded = true;
+            setStatus('Modelo inicializado (pode ser stub se você usou o runtime de exemplo).');
+            state.loadingModel = false;
+            return true;
+        } catch (err) {
+            console.error('Erro criando modelo', err);
+            setStatus('Erro ao inicializar o modelo via runtime. Veja o console.');
+            state.loadingModel = false;
+            return false;
+        }
+    } catch (err) {
+        console.error(err);
+        state.loadingModel = false;
+        setStatus('Erro ao carregar o runtime/modelo.');
+        return false;
+    }
+}
+
+/* -------------------------
+   PROMPT BUILDERS
+   ------------------------- */
+function buildStoryPrompt() {
+    const toneMap = {
+        emotional: 'Emocionalmente comovente, focando em sentimentos profundos e conexões humanas',
+        dramatic: 'Altamente dramática, com tensão e conflitos intensos',
+        inspiring: 'Inspiradora e motivacional, mostrando superação e esperança',
+        mysterious: 'Intrigante com reviravoltas inesperadas mas realistas'
+    };
+    const audienceMap = {
+        general: 'Todos os públicos',
+        young: 'Jovens de 15 a 25 anos',
+        mature: 'Adultos acima de 30 anos',
+        family: 'Apto para toda a família'
+    };
+    const durationMap = {
+        short: '600-800 palavras',
+        long: '900-1200 palavras',
+        epic: '1200-1500 palavras'
+    };
+    const prompt = `Você é um escritor de classe mundial. Crie exatamente 5 capítulos interligados para um vídeo baseado nas informações:
+País: ${state.form.country}
+Título: ${state.form.title}
+Sinopse: ${state.form.synopsis}
+Idioma: ${state.form.outputLanguage}
+Tom: ${toneMap[state.form.tone]}
+Público: ${audienceMap[state.form.targetAudience]}
+Tamanho por capítulo: ${durationMap[state.form.duration]}
+
+Requisitos:
+1) Cada capítulo deve ter: TÍTULO | RESUMO (2-3 linhas) | CORPO NARRATIVO (em parágrafos corridos).
+2) Ambientação precisa no país informado, com referências culturais e locais reais.
+3) Diálogos naturais, personagens multidimensionais, crescendo emocional.
+4) Evite elementos sobrenaturais e anacronismos.
+5) Entregue todo o conteúdo no idioma pedido.
+
+FORMATO DE SAÍDA:
+Separe os capítulos com a linha ===CAPÍTULO [N]=== e mantenha o formato claro.`;
+
+    return prompt;
+}
+
+function buildImagePromptsInstruction(storyText) {
+    return `Com base no texto abaixo, gere:
+1) Um prompt cinematográfico detalhado para cada capítulo (5 prompts). Cada prompt deve conter: descrição visual, composição, iluminação, atmosfera, roupas, expressões, cenário, nível de detalhe, estilo fotográfico (ex: realista, cinematic), câmera (lens, angle) e duas palavras-chave.
+2) Um prompt separado específico para THUMBNAIL viral: incluir título em caixa alta, pessoa em close, cores chamativas, texto curto na capa, emoção exagerada, contrates, e sugestão de cor dominante.
+3) Entregue em formato JSON com a chave "chapter_prompts" (array de 5 strings) e "thumbnail_prompt" (string). Não inclua nada além do JSON.
+
+TEXTO BASE:
+${storyText}
+`;
+}
+
+/* -------------------------
+   GENERATION FLOW
+   ------------------------- */
+async function onGenerate() {
+    // validate
+    if (!state.form.country.trim() || !state.form.title.trim() || !state.form.synopsis.trim()) {
+        alert('Preencha País, Título e Sinopse antes de gerar.');
+        return;
+    }
+    // ensure runtime/model ready
+    const ok = await loadModel();
+    if (!ok) return;
+
+    setStatus('Gerando história (pode demorar)...');
+    state.generating = true;
+    render();
+
+    try {
+        const storyPrompt = buildStoryPrompt();
+        let storyText = null;
+        setStatus('Enviando prompt ao modelo...');
+        if (state.llm.generate) {
+            const gen = await state.llm.generate(storyPrompt, {max_new_tokens: 3000, temperature: 0.8});
+            storyText = (typeof gen === 'string') ? gen : (gen.text || gen.output || JSON.stringify(gen));
+        } else if (state.llm.predict) {
+            const res = await state.llm.predict(storyPrompt);
+            storyText = res?.text || res?.output || JSON.stringify(res);
+        } else {
+            throw new Error('Interface do modelo inesperada.');
+        }
+
+        state.story = {
+            title: state.form.title,
+            country: state.form.country,
+            synopsis: state.form.synopsis,
+            language: state.form.outputLanguage,
+            tone: state.form.tone,
+            audience: state.form.targetAudience,
+            duration: state.form.duration,
+            content: storyText,
+            createdAt: new Date().toLocaleString('pt-BR')
+        };
+
+        renderResult();
+        setStatus('História gerada. Gerando prompts de imagem...');
+        await generateImagePrompts(storyText);
+        setStatus('Pronto — história e prompts gerados.');
+    } catch (err) {
+        console.error(err);
+        setStatus('Erro durante geração: ' + (err.message || err));
+        alert('Erro: ' + (err.message || 'ver console'));
+    } finally {
+        state.generating = false;
+        render();
+    }
+}
+
+/* -------------------------
+   IMAGE PROMPTS GENERATION
+   ------------------------- */
+async function generateImagePrompts(storyText) {
+    try {
+        const instr = buildImagePromptsInstruction(storyText);
+        setStatus('Gerando prompts de imagem...');
+        let out = null;
+        if (state.llm.generate) {
+            const gen = await state.llm.generate(instr, {max_new_tokens: 800, temperature: 0.7});
+            out = (typeof gen === 'string') ? gen : (gen.text || gen.output || JSON.stringify(gen));
+        } else if (state.llm.predict) {
+            const res = await state.llm.predict(instr);
+            out = res?.text || res?.output || JSON.stringify(res);
+        } else {
+            throw new Error('Interface do modelo inesperada.');
+        }
+
+        const json = extractJson(out);
+        if (!json) {
+            state.prompts = {
+                chapter_prompts: Array.from({length:5}, (_,i)=>`[Prompt fallback] Capítulo ${i+1}: resumo visual baseado no capítulo.`),
+                thumbnail_prompt: `[Prompt fallback] Thumbnail dramática com título: ${state.form.title.toUpperCase()}`
+            };
+        } else {
+            state.prompts = json;
+        }
+        renderResult();
+    } catch (err) {
+        console.error('Erro prompts imagem', err);
+        state.prompts = {
+            chapter_prompts: Array.from({length:5}, (_,i)=>`[Erro ao gerar] Capítulo ${i+1}: tente novamente.`),
+            thumbnail_prompt: `[Erro ao gerar] Thumbnail: tente novamente.`
+        };
+        renderResult();
+    }
+}
+
+/* -------------------------
+   RENDER RESULT AREA
+   ------------------------- */
+function renderResult() {
+    const area = document.getElementById('resultArea');
+    if (!state.story) {
+        area.innerHTML = '';
+        return;
+    }
+    area.innerHTML = `
+      <div class="bg-slate-800 rounded-xl p-6 mt-6">
+        <div class="flex items-start justify-between">
+          <div>
+            <h2 class="text-2xl font-bold">${escapeHtml(state.story.title)}</h2>
+            <div class="text-sm text-slate-400 mt-1">📍 ${escapeHtml(state.story.country)} • ${escapeHtml(state.story.language)}</div>
+            <div class="text-xs text-slate-400 mt-2">Gerado em: ${state.story.createdAt}</div>
+          </div>
+          <div class="flex gap-2">
+            <button class="px-3 py-2 bg-blue-600 rounded" onclick="copyStory()">Copiar</button>
+            <button class="px-3 py-2 bg-green-600 rounded" onclick="downloadStory()">Baixar (.txt)</button>
+          </div>
+        </div>
+
+        <div class="mt-4 bg-slate-700 rounded p-4">
+          <h3 class="font-semibold text-white">📖 Sinopse</h3>
+          <p class="text-slate-200 mt-2">${escapeHtml(state.story.synopsis)}</p>
+        </div>
+
+        <div class="mt-4">
+          <h3 class="font-semibold text-white">📚 Conteúdo</h3>
+          <pre class="mt-2 p-4 bg-slate-900 rounded max-h-96 overflow-auto text-sm">${escapeHtml(state.story.content)}</pre>
+        </div>
+
+        <div class="mt-4">
+          <h3 class="font-semibold text-white">📷 Prompts de Imagem (Modo 3: Cinematográfico + Thumbnail)</h3>
+          <div class="mt-3 grid md:grid-cols-2 gap-4">
+            <div class="p-4 bg-slate-700 rounded">
+              <h4 class="font-semibold">Prompts por Capítulo</h4>
+              <ol id="chapterPrompts" class="list-decimal ml-5 mt-2 text-sm text-slate-200">
+                ${(state.prompts && state.prompts.chapter_prompts ? state.prompts.chapter_prompts.map(p=>`<li class="mb-3"><pre class="p-2 bg-slate-800 rounded">${escapeHtml(p)}</pre></li>`).join('') : Array.from({length:5},(_,i)=>`<li class="mb-3"><pre class="p-2 bg-slate-800 rounded">Aguardando geração...</pre></li>`).join(''))}
+              </ol>
+              <div class="mt-2 flex gap-2">
+                <button class="px-3 py-2 bg-indigo-600 rounded" onclick="copyChapterPrompts()">Copiar todos</button>
+                <button class="px-3 py-2 bg-emerald-600 rounded" onclick="downloadChapterPrompts()">Baixar (.txt)</button>
+              </div>
+            </div>
+
+            <div class="p-4 bg-slate-700 rounded">
+              <h4 class="font-semibold">Prompt para Thumbnail</h4>
+              <div id="thumbnailPrompt" class="mt-2 text-sm text-slate-200 p-3 bg-slate-800 rounded">${state.prompts && state.prompts.thumbnail_prompt ? `<pre>${escapeHtml(state.prompts.thumbnail_prompt)}</pre>` : `<pre>Aguardando geração...</pre>`}</div>
+              <div class="mt-2 flex gap-2">
+                <button class="px-3 py-2 bg-indigo-600 rounded" onclick="copyThumbnail()">Copiar</button>
+                <button class="px-3 py-2 bg-emerald-600 rounded" onclick="downloadThumbnail()">Baixar (.txt)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    `;
+}
+
+/* -------------------------
+   UTIL: extract JSON from model output
+   ------------------------- */
+function extractJson(text) {
+    try {
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start === -1 || end === -1) return null;
+        const sub = text.substring(start, end+1);
+        return JSON.parse(sub);
+    } catch (err) {
+        console.warn('Falha ao parsear JSON do output.', err);
+        return null;
+    }
+}
+
+/* -------------------------
+   COPY / DOWNLOAD helpers
+   ------------------------- */
+function copyStory() {
+    const text = `${state.story.title}\n\nPaís: ${state.story.country}\nIdioma: ${state.story.language}\n\nSinopse:\n${state.story.synopsis}\n\n${state.story.content}`;
+    navigator.clipboard.writeText(text).then(()=>alert('História copiada para a área de transferência!'));
+}
+function downloadStory() {
+    const text = `${state.story.title}\n\nPaís: ${state.story.country}\nIdioma: ${state.story.language}\n\nSinopse:\n${state.story.synopsis}\n\n${state.story.content}`;
+    downloadText(`${state.story.title.replace(/\s+/g,'_')}.txt`, text);
+}
+function copyChapterPrompts() {
+    const all = (state.prompts && state.prompts.chapter_prompts) ? state.prompts.chapter_prompts.join("\n\n") : '';
+    navigator.clipboard.writeText(all).then(()=>alert('Prompts dos capítulos copiados!'));
+}
+function downloadChapterPrompts() {
+    const all = (state.prompts && state.prompts.chapter_prompts) ? state.prompts.chapter_prompts.join("\n\n") : '';
+    downloadText(`${state.story.title.replace(/\s+/g,'_')}_chapter_prompts.txt`, all);
+}
+function copyThumbnail() {
+    const t = state.prompts && state.prompts.thumbnail_prompt ? state.prompts.thumbnail_prompt : '';
+    navigator.clipboard.writeText(t).then(()=>alert('Prompt da thumbnail copiado!'));
+}
+function downloadThumbnail() {
+    const t = state.prompts && state.prompts.thumbnail_prompt ? state.prompts.thumbnail_prompt : '';
+    downloadText(`${state.story.title.replace(/\s+/g,'_')}_thumbnail_prompt.txt`, t);
+}
+
+/* -------------------------
+   STATUS
+   ------------------------- */
+function setStatus(msg) {
+    const el = document.getElementById('statusArea');
+    if (!el) return;
+    el.innerText = msg;
+}
+
+/* -------------------------
+   HELP PANEL
+   ------------------------- */
+function toggleHelp() {
+    const help = `PASSOS RÁPIDOS PARA RODAR O MODELO LOCAL:
+1) Baixe o runtime: https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.0.35/dist/webllm.min.js
+2) Salve como webllm.min.js no seu computador.
+3) Clique em "Escolher arquivo" e selecione o webllm.min.js baixado.
+4) Depois clique em "Gerar História". O arquivo será injetado no HTML e o modelo será inicializado (pode demorar). 
+
+IMPORTANTE: se você quiser usar o modelo Qwen-2-7B real no navegador, precisa também hospedar os artefatos do modelo (pesos) e/ou usar um runtime que já aponte para um servidor que contenha os pesos. O runtime por si só não inclui os pesos do modelo. Se não tiver os artefatos, use o botão "runtime de exemplo" apenas para testar a interface.`;
+
+    alert(help);
+}
+
+/* -------------------------
+   SAFETY / ESCAPE
+   ------------------------- */
+function escapeHtml(unsafe) {
+    if (!unsafe && unsafe !== 0) return '';
+    return String(unsafe)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+/* -------------------------
+   BOOT
+   ------------------------- */
+render();
+</script>
+</body>
+</html>
